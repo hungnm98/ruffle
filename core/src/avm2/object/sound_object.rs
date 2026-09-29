@@ -12,6 +12,7 @@ use crate::context::UpdateContext;
 use crate::display_object::SoundTransform;
 use crate::string::AvmString;
 use core::fmt;
+use futures_util::future::AbortHandle;
 use gc_arena::barrier::unlock;
 use gc_arena::{
     Collect, DynamicRoot, Gc, GcWeak, Mutation, Rootable,
@@ -19,7 +20,7 @@ use gc_arena::{
 };
 use id3::{Tag, TagLike};
 use ruffle_common::utils::HasPrefixField;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 use swf::SoundInfo;
 
@@ -37,6 +38,7 @@ pub fn sound_allocator<'gc>(
         SoundObjectData {
             base,
             loading_state: Cell::new(SoundLoadingState::New),
+            load_abort: RefCell::new(None),
             sound_data: RefLock::new(SoundData::NotLoaded {
                 queued_plays: Vec::new(),
             }),
@@ -85,6 +87,9 @@ pub struct SoundObjectData<'gc> {
     /// Loading state of the sound.
     loading_state: Cell<SoundLoadingState>,
 
+    #[collect(require_static)]
+    load_abort: RefCell<Option<AbortHandle>>,
+
     /// The sound this object holds.
     sound_data: RefLock<SoundData<'gc>>,
 
@@ -115,11 +120,12 @@ pub struct QueuedPlay<'gc> {
     pub position: f64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoundLoadingState {
     New,
     Loading,
     Loaded,
+    Closed,
 }
 
 impl<'gc> SoundObject<'gc> {
@@ -137,6 +143,32 @@ impl<'gc> SoundObject<'gc> {
 
     pub fn set_loading_state(self, value: SoundLoadingState) {
         self.0.loading_state.set(value);
+    }
+
+    pub fn begin_load(self, abort: AbortHandle) {
+        *self.0.load_abort.borrow_mut() = Some(abort);
+        self.set_loading_state(SoundLoadingState::Loading);
+    }
+
+    pub fn finish_load(self) {
+        self.0.load_abort.borrow_mut().take();
+    }
+
+    /// Close the pending download without stopping any already loaded audio.
+    pub fn close_load(self, context: &UpdateContext<'gc>) -> bool {
+        if self.loading_state() != SoundLoadingState::Loading {
+            return false;
+        }
+        self.set_loading_state(SoundLoadingState::Closed);
+        if let Some(abort) = self.0.load_abort.borrow_mut().take() {
+            abort.abort();
+        }
+        let mut data =
+            unlock!(Gc::write(context.gc(), self.0), SoundObjectData, sound_data).borrow_mut();
+        if let SoundData::NotLoaded { queued_plays } = &mut *data {
+            queued_plays.clear();
+        }
+        true
     }
 
     /// Returns `true` if a `SoundChannel` should be returned back to the AVM2 caller.

@@ -473,6 +473,15 @@ impl RuffleHandle {
         #[expect(clippy::boxed_local)] // for js_bind
         args: Box<[JsValue]>,
     ) -> JsValue {
+        if name == "__localDebug"
+            && js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("__VPT_LOCAL_DEBUG__"))
+                .ok().and_then(|v| v.as_bool()) == Some(true)
+        {
+            let request = args.first().map(js_to_external_value).unwrap_or(ruffle_core::external::Value::Null);
+            return self.with_core_mut(|core| core.mutate_with_update_context(|context| {
+                external_to_js_value(ruffle_core::local_debug::run(context, request))
+            })).unwrap_or(JsValue::UNDEFINED);
+        }
         let args = args.iter().map(js_to_external_value);
 
         // Re-entrant callbacks need to return through the hole that was punched through for them

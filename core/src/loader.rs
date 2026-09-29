@@ -39,6 +39,7 @@ use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
 use chardetng::EncodingDetector;
 use encoding_rs::{UTF_8, WINDOWS_1252};
+use futures_util::future::{AbortHandle, Abortable};
 use gc_arena::Collect;
 use indexmap::IndexMap;
 use ruffle_common::tag_utils::LoadBytesInfo;
@@ -1470,9 +1471,11 @@ pub fn load_sound_avm2<'gc>(
     request: Request,
 ) -> OwnedFuture<(), Error> {
     let player = uc.player_handle();
+    let (abort, registration) = AbortHandle::new_pair();
+    sound.begin_load(abort);
     let sound = SoundObjectHandle::stash(uc, sound);
 
-    Box::pin(async move {
+    let load = async move {
         let fetch = player.lock().unwrap().fetch(request, FetchReason::Other);
         let response = wait_for_full_response(fetch).await;
 
@@ -1480,10 +1483,13 @@ pub fn load_sound_avm2<'gc>(
             let sound = sound.fetch(uc);
             let sound_object = Avm2Object::from(sound);
 
-            if sound.loading_state() == SoundLoadingState::Loaded {
-                // Sound has already been loaded.
+            sound.finish_load();
+            if sound.loading_state() != SoundLoadingState::Loading {
+                // The download was closed or replaced by byte-array audio.
                 return Ok(());
             }
+            // The stream is now closed, including on decode or network failure.
+            sound.set_loading_state(SoundLoadingState::Closed);
 
             match response {
                 Ok((body, _, _, _)) => {
@@ -1536,7 +1542,8 @@ pub fn load_sound_avm2<'gc>(
 
             Ok(())
         })
-    })
+    };
+    Box::pin(async move { Abortable::new(load, registration).await.unwrap_or(Ok(())) })
 }
 
 /// Buffer video or audio into a NetStream.

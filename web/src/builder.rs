@@ -41,6 +41,7 @@ pub struct RuffleInstanceBuilder {
     pub(crate) upgrade_to_https: bool,
     pub(crate) compatibility_rules: CompatibilityRules,
     pub(crate) base_url: Option<String>,
+    pub(crate) spoofed_url: Option<String>,
     pub(crate) show_menu: bool,
     pub(crate) allow_fullscreen: bool,
     pub(crate) stage_align: StageAlign,
@@ -57,6 +58,7 @@ pub struct RuffleInstanceBuilder {
     pub(crate) open_url_mode: OpenUrlMode,
     pub(crate) allow_networking: NetworkingAccessMode,
     pub(crate) socket_proxy: Vec<SocketProxy>,
+    pub(crate) rtmp_proxy: Option<String>,
     pub(crate) credential_allow_list: Vec<String>,
     pub(crate) player_runtime: PlayerRuntime,
     pub(crate) volume: f32,
@@ -81,6 +83,7 @@ impl Default for RuffleInstanceBuilder {
             upgrade_to_https: true,
             compatibility_rules: CompatibilityRules::default(),
             base_url: None,
+            spoofed_url: None,
             show_menu: true,
             allow_fullscreen: false,
             stage_align: StageAlign::empty(),
@@ -97,6 +100,7 @@ impl Default for RuffleInstanceBuilder {
             open_url_mode: OpenUrlMode::Allow,
             allow_networking: NetworkingAccessMode::All,
             socket_proxy: vec![],
+            rtmp_proxy: None,
             credential_allow_list: vec![],
             player_runtime: PlayerRuntime::FlashPlayer,
             volume: 1.0,
@@ -271,6 +275,17 @@ impl RuffleInstanceBuilder {
             "none" => NetworkingAccessMode::None,
             _ => return,
         };
+    }
+
+    /// Preserve the root movie's source identity when its bytes use an asset proxy.
+    #[wasm_bindgen(js_name = "setSpoofedUrl")]
+    pub fn set_spoofed_url(&mut self, url: String) {
+        self.spoofed_url = Some(url);
+    }
+
+    #[wasm_bindgen(js_name = "setRtmpProxy")]
+    pub fn set_rtmp_proxy(&mut self, url: String) {
+        self.rtmp_proxy = Some(url);
     }
 
     #[wasm_bindgen(js_name = "addSocketProxy")]
@@ -651,6 +666,7 @@ impl RuffleInstanceBuilder {
             log_subscriber,
             self.open_url_mode,
             self.socket_proxy.clone(),
+            self.rtmp_proxy.clone(),
             self.credential_allow_list.clone(),
         )
     }
@@ -712,6 +728,7 @@ impl RuffleInstanceBuilder {
             .with_scale_mode(self.scale, self.force_scale)
             .with_frame_rate(self.frame_rate)
             .with_page_url(window.location().href().ok())
+            .with_spoofed_url(self.spoofed_url.clone())
             .with_gamepad_button_mapping(self.gamepad_button_mapping.clone())
             .build();
 

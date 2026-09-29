@@ -51,6 +51,8 @@ export const DEFAULT_CONFIG: Required<BaseLoadOptions> = {
     allowNetworking: NetworkingAccessMode.All,
     openInNewTab: null,
     socketProxy: [],
+    rtmpProxy: null,
+    spoofedUrl: null,
     fontSources: [],
     defaultFonts: {},
     credentialAllowList: [],

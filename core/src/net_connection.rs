@@ -1,3 +1,6 @@
+mod rtmp;
+use rtmp::{Rtmp, RtmpEvent};
+
 use crate::Player;
 use crate::avm1::Object as Avm1Object;
 use crate::avm1::globals::netconnection::NetConnection as Avm1NetConnectionObject;
@@ -165,6 +168,29 @@ impl<'gc> NetConnections<'gc> {
         }
     }
 
+    pub fn connect_to_rtmp(
+        context: &mut UpdateContext<'gc>,
+        target: Avm2NetConnectionObject<'gc>,
+        url: String,
+        arguments: Vec<Rc<AmfValue>>,
+    ) {
+        let (outgoing, receiver) = async_channel::bounded(256);
+        let (sender, incoming) = async_channel::bounded(256);
+        // Use the logical launch URL (including spoofedUrl), not the asset proxy
+        // URL or the generated URL of a child loaded with Loader.loadBytes.
+        let swf_url = context.root_swf.url().to_owned();
+        let rtmp = Rtmp::new(url.clone(), swf_url, arguments, outgoing, incoming);
+        let connection = NetConnection {
+            object: target.into(),
+            protocol: NetConnectionProtocol::Rtmp(rtmp),
+        };
+        let handle = context.net_connections.connections.insert(connection);
+        if let Some(previous) = target.set_handle(Some(handle)) {
+            NetConnections::close(context, previous, false);
+        }
+        context.navigator.connect_rtmp(url, receiver, sender);
+    }
+
     pub fn connect_to_flash_remoting<O: Into<NetConnectionObject<'gc>>>(
         context: &mut UpdateContext<'gc>,
         target: O,
@@ -241,8 +267,29 @@ impl<'gc> NetConnections<'gc> {
 
     pub fn update_connections(context: &mut UpdateContext<'gc>) {
         let player = context.player_handle();
+        let mut events = Vec::new();
         for (handle, connection) in context.net_connections.connections.iter_mut() {
             connection.update(handle, context.navigator, &player);
+            if let NetConnectionProtocol::Rtmp(rtmp) = &mut connection.protocol {
+                events.extend(rtmp.receive().into_iter().map(|event| (handle, event)));
+            }
+        }
+        for (handle, event) in events {
+            // A callback can close/reconnect its NetConnection; discard stale events.
+            let Some(connection) = context.net_connections.connections.get(handle) else {
+                continue;
+            };
+            let NetConnectionObject::Avm2(object) = connection.object else {
+                continue;
+            };
+            if let NetConnectionProtocol::Rtmp(rtmp) =
+                &mut context.net_connections.connections[handle].protocol
+            {
+                if let RtmpEvent::Status(info) = &event {
+                    rtmp.connected = rtmp::connected_after_status(rtmp.connected, info);
+                }
+            }
+            rtmp::dispatch(context, object, event);
         }
     }
 
@@ -351,6 +398,7 @@ impl NetConnection<'_> {
         match self.protocol {
             NetConnectionProtocol::Local => true,
             NetConnectionProtocol::FlashRemoting(_) => false,
+            NetConnectionProtocol::Rtmp(ref rtmp) => rtmp.connected,
         }
     }
 
@@ -358,6 +406,7 @@ impl NetConnection<'_> {
         match self.protocol {
             NetConnectionProtocol::Local => Some("none"),
             NetConnectionProtocol::FlashRemoting(_) => None,
+            NetConnectionProtocol::Rtmp(_) => Some("none"),
         }
     }
 
@@ -365,6 +414,7 @@ impl NetConnection<'_> {
         match self.protocol {
             NetConnectionProtocol::Local => Some(""),
             NetConnectionProtocol::FlashRemoting(_) => None,
+            NetConnectionProtocol::Rtmp(_) => None,
         }
     }
 
@@ -374,6 +424,7 @@ impl NetConnection<'_> {
                 Some("0000000000000000000000000000000000000000000000000000000000000000")
             }
             NetConnectionProtocol::FlashRemoting(_) => None,
+            NetConnectionProtocol::Rtmp(_) => None,
         }
     }
 
@@ -381,6 +432,7 @@ impl NetConnection<'_> {
         match self.protocol {
             NetConnectionProtocol::Local => Some(""),
             NetConnectionProtocol::FlashRemoting(_) => None,
+            NetConnectionProtocol::Rtmp(_) => None,
         }
     }
 
@@ -390,12 +442,18 @@ impl NetConnection<'_> {
                 Some("0000000000000000000000000000000000000000000000000000000000000000")
             }
             NetConnectionProtocol::FlashRemoting(_) => None,
+            NetConnectionProtocol::Rtmp(_) => None,
         }
     }
 
     pub fn protocol(&self) -> Option<&'static str> {
         match self.protocol {
             NetConnectionProtocol::Local => Some("rtmp"),
+            NetConnectionProtocol::Rtmp(ref rtmp) => Some(if rtmp.url.starts_with("rtmpe:") {
+                "rtmpe"
+            } else {
+                "rtmp"
+            }),
             NetConnectionProtocol::FlashRemoting(_) => None,
         }
     }
@@ -404,12 +462,14 @@ impl NetConnection<'_> {
         match &self.protocol {
             NetConnectionProtocol::Local => Some("null".to_string()), // Yes, it's a string "null", not a real null.
             NetConnectionProtocol::FlashRemoting(remoting) => Some(remoting.url.to_string()),
+            NetConnectionProtocol::Rtmp(rtmp) => Some(rtmp.url.clone()),
         }
     }
 
     pub fn using_tls(&self) -> Option<bool> {
         match &self.protocol {
             NetConnectionProtocol::Local => Some(false),
+            NetConnectionProtocol::Rtmp(_) => Some(false),
             NetConnectionProtocol::FlashRemoting(_) => None,
         }
     }
@@ -422,6 +482,7 @@ impl NetConnection<'_> {
     ) {
         match &mut self.protocol {
             NetConnectionProtocol::Local => {}
+            NetConnectionProtocol::Rtmp(rtmp) => rtmp.send(command, responder_handle, message),
             NetConnectionProtocol::FlashRemoting(remoting) => {
                 remoting.send(command, responder_handle, message)
             }
@@ -435,7 +496,7 @@ impl NetConnection<'_> {
         player: &Arc<Mutex<Player>>,
     ) {
         match &mut self.protocol {
-            NetConnectionProtocol::Local => {}
+            NetConnectionProtocol::Local | NetConnectionProtocol::Rtmp(_) => {}
             NetConnectionProtocol::FlashRemoting(remoting) => {
                 if remoting.has_pending_packet() {
                     navigator.spawn_future(remoting.flush_queue(self_handle, player.clone()));
@@ -446,7 +507,7 @@ impl NetConnection<'_> {
 
     pub fn set_header(&mut self, header: Header) {
         match &mut self.protocol {
-            NetConnectionProtocol::Local => {}
+            NetConnectionProtocol::Local | NetConnectionProtocol::Rtmp(_) => {}
             NetConnectionProtocol::FlashRemoting(remoting) => {
                 remoting.set_header(header);
             }
@@ -461,6 +522,9 @@ pub enum NetConnectionProtocol {
 
     /// Flash Remoting protocol, caused by connecting to a `http://` address.
     FlashRemoting(FlashRemoting),
+
+    /// Persistent command transport via an explicit WebSocket bridge.
+    Rtmp(Rtmp),
 }
 
 #[derive(Debug)]

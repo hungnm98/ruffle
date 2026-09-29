@@ -3,7 +3,7 @@
 use crate::avm2::Avm2;
 use crate::avm2::Error;
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{make_error_2037, make_error_2084};
+use crate::avm2::error::{make_error_2029, make_error_2037, make_error_2084};
 use crate::avm2::function::FunctionArgs;
 use crate::avm2::globals::slots::flash_net_url_request as url_request_slots;
 use crate::avm2::object::{
@@ -18,6 +18,9 @@ use crate::{avm2_stub_getter, avm2_stub_method};
 use swf::{SoundEvent, SoundInfo};
 
 pub use crate::avm2::object::sound_allocator;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests;
 
 /// Implements `flash.media.Sound`'s 'init' method. which is called from the constructor.
 pub fn init<'gc>(
@@ -214,10 +217,13 @@ pub fn extract<'gc>(
 /// `Sound.close`
 pub fn close<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Value<'gc>,
+    this: Value<'gc>,
     _args: FunctionArgs<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_method!(activation, "flash.media.Sound", "close");
+    let sound = this.as_object().unwrap().as_sound_object().unwrap();
+    if !sound.close_load(activation.context) {
+        return Err(make_error_2029(activation));
+    }
     Ok(Value::Undefined)
 }
 
@@ -257,7 +263,6 @@ pub fn load<'gc>(
         Request::get(url.to_string()),
     );
     activation.context.navigator.spawn_future(future);
-    this.set_loading_state(SoundLoadingState::Loading);
 
     Ok(Value::Undefined)
 }

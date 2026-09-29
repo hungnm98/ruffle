@@ -4850,6 +4850,7 @@ dependencies = [
  "flv-rs",
  "fnv",
  "futures",
+ "futures-util",
  "gc-arena",
  "hashbrown 0.17.1",
  "id3",

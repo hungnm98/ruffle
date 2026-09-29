@@ -331,6 +331,17 @@ pub trait NavigatorBackend: Any {
     /// URL (generally only if configured to do so by the user).
     fn pre_process_url(&self, url: Url) -> Url;
 
+    /// Exchange AMF0 command messages with an explicitly configured RTMP bridge.
+    /// Dropping either channel closes the transport. Backends without support
+    /// drop the channels, causing an asynchronous connection failure.
+    fn connect_rtmp(
+        &mut self,
+        _url: String,
+        _receiver: Receiver<Vec<u8>>,
+        _sender: Sender<Vec<u8>>,
+    ) {
+    }
+
     /// Handle any Socket connection request
     ///
     /// Use [SocketAction::Connect] to notify AVM that the connection failed or succeeded.

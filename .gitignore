@@ -19,3 +19,8 @@ RECOVER_*.fla
 
 # A developers local Flash Player harness config
 .flash_players.toml
+
+# Local bridge binaries and build tools
+/.tools/
+/bridge/bin/
+/bridge/node_modules/

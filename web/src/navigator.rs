@@ -28,8 +28,8 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use wasm_streams::readable::ReadableStream;
 use web_sys::{
-    Blob, BlobPropertyBag, HtmlFormElement, HtmlInputElement, Request as WebRequest,
-    RequestCredentials, RequestInit, Response as WebResponse, window,
+    AbortController, Blob, BlobPropertyBag, HtmlFormElement, HtmlInputElement,
+    Request as WebRequest, RequestCredentials, RequestInit, Response as WebResponse, window,
 };
 
 /// The handling mode of links opening a new website.
@@ -57,6 +57,7 @@ pub struct WebNavigatorBackend {
     base_url: Option<Url>,
     open_url_mode: OpenUrlMode,
     socket_proxies: Vec<SocketProxy>,
+    rtmp_proxy: Option<String>,
     credential_allow_list: Vec<String>,
     player: Weak<Mutex<Player>>,
 }
@@ -72,6 +73,7 @@ impl WebNavigatorBackend {
         log_subscriber: Arc<Layered<WASMLayer, Registry>>,
         open_url_mode: OpenUrlMode,
         socket_proxies: Vec<SocketProxy>,
+        rtmp_proxy: Option<String>,
         credential_allow_list: Vec<String>,
     ) -> Self {
         let window = web_sys::window().expect("window()");
@@ -116,6 +118,7 @@ impl WebNavigatorBackend {
             log_subscriber,
             open_url_mode,
             socket_proxies,
+            rtmp_proxy,
             credential_allow_list,
             player: Weak::new(),
         }
@@ -338,6 +341,14 @@ impl NavigatorBackend for WebNavigatorBackend {
 
         Box::pin(async move {
             let init = RequestInit::new();
+            let abort = Rc::new(AbortFetchOnDrop(AbortController::new().map_err(|_| {
+                create_specific_fetch_error(
+                    "Unable to create abort controller for",
+                    url.as_str(),
+                    "",
+                )
+            })?));
+            init.set_signal(Some(&abort.0.signal()));
 
             init.set_method(&request.method().to_string());
             init.set_credentials(credentials);
@@ -420,6 +431,7 @@ impl NavigatorBackend for WebNavigatorBackend {
             }
 
             let wrapper: Box<dyn SuccessResponse> = Box::new(WebResponseWrapper {
+                abort,
                 rewritten_url: None,
                 response,
                 body_stream: None,
@@ -489,6 +501,44 @@ impl NavigatorBackend for WebNavigatorBackend {
         }
 
         url
+    }
+
+    fn connect_rtmp(&mut self, url: String, receiver: Receiver<Vec<u8>>, sender: Sender<Vec<u8>>) {
+        if self.allow_networking == NetworkingAccessMode::None {
+            return;
+        }
+        let Some(proxy) = &self.rtmp_proxy else {
+            tracing::warn!("RTMP requires an explicit rtmpProxy bridge URL");
+            return;
+        };
+        let Ok(ws) = WebSocket::open(proxy) else {
+            return;
+        };
+        let (mut write, mut read) = ws.split();
+        self.spawn_future(Box::pin(async move {
+            // The destination is sent as a control message; credentials stay in
+            // binary AMF messages, never in a URL or log.
+            if write.send(Message::Text(url)).await.is_ok() {
+                loop {
+                    match future::select(read.next(), std::pin::pin!(receiver.recv())).await {
+                        Either::Left((Some(Ok(Message::Bytes(bytes))), _)) => {
+                            if bytes.len() > 8 * 1024 * 1024 || sender.try_send(bytes).is_err() {
+                                break;
+                            }
+                        }
+                        Either::Right((Ok(bytes), _)) => {
+                            if write.send(Message::Bytes(bytes)).await.is_err() {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            let ws = write.reunite(read).expect("same RTMP websocket");
+            let _ = ws.close(None, None);
+            Ok(())
+        }));
     }
 
     fn connect_socket(
@@ -571,7 +621,17 @@ impl NavigatorBackend for WebNavigatorBackend {
     }
 }
 
+/// Dropping a Rust fetch future must also cancel the browser's request/body reader.
+struct AbortFetchOnDrop(AbortController);
+
+impl Drop for AbortFetchOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 struct WebResponseWrapper {
+    abort: Rc<AbortFetchOnDrop>,
     rewritten_url: Option<String>,
     response: WebResponse,
     body_stream: Option<Rc<RefCell<ReadableStream>>>,
@@ -591,6 +651,7 @@ impl SuccessResponse for WebResponseWrapper {
 
     fn body(self: Box<Self>) -> OwnedFuture<Vec<u8>, Error> {
         Box::pin(async move {
+            let _abort = self.abort;
             let body = JsFuture::from(
                 self.response
                     .array_buffer()
@@ -640,7 +701,9 @@ impl SuccessResponse for WebResponseWrapper {
         }
 
         let body_stream = self.body_stream.clone().expect("web body stream");
+        let abort = self.abort.clone();
         Box::pin(async move {
+            let _abort = abort;
             let read_lock = body_stream.try_borrow_mut();
             if read_lock.is_err() {
                 return Err(Error::FetchError(

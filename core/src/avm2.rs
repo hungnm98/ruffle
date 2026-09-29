@@ -44,6 +44,7 @@ macro_rules! avm_debug {
 
 pub mod activation;
 mod amf;
+pub(crate) use amf::deserialize_value;
 pub mod api_version;
 mod array;
 pub mod bytearray;

@@ -77,3 +77,6 @@ pub const DEFAULT_PLAYER_VERSION: u8 = 32;
 
 /// Path to the raw playerglobal ABC, for use as an `asc.jar` import library.
 pub const PLAYERGLOBAL_ABC_PATH: &str = env!("RUFFLE_PLAYERGLOBAL_ABC_PATH");
+
+/// Opt-in local host-page inspection and method calls.
+pub mod local_debug;

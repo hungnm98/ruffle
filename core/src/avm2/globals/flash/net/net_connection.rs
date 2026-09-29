@@ -42,6 +42,28 @@ pub fn connect<'gc>(
                 connection,
                 url.to_string(),
             );
+        } else if url_lower.starts_with(WStr::from_units(b"rtmp://"))
+            || url_lower.starts_with(WStr::from_units(b"rtmpe://"))
+        {
+            let mut object_table = FnvHashMap::default();
+            let arguments = args
+                .get_slice_from(1..)
+                .iter()
+                .map(|value| {
+                    Rc::new(serialize_value(
+                        activation,
+                        value,
+                        AMFVersion::AMF0,
+                        &mut object_table,
+                    ))
+                })
+                .collect();
+            NetConnections::connect_to_rtmp(
+                activation.context,
+                connection,
+                url.to_string(),
+                arguments,
+            );
         } else {
             avm2_stub_method!(
                 activation,

@@ -712,6 +712,12 @@ export interface BaseLoadOptions {
      */
     socketProxy?: Array<SocketProxy>;
 
+    /** WebSocket endpoint for the optional AMF0 RTMP/RTMPE bridge. */
+    rtmpProxy?: string | null;
+
+    /** Root movie URL exposed to ActionScript; does not change the fetch target. */
+    spoofedUrl?: string | null;
+
     /**
      * An array of font URLs to eagerly load and provide to Ruffle.
      *

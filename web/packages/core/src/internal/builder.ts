@@ -104,6 +104,12 @@ export function configureBuilder(
         builder.setPlayerRuntime(config.playerRuntime);
     }
 
+    if (isExplicit(config.spoofedUrl)) {
+        builder.setSpoofedUrl(config.spoofedUrl);
+    }
+    if (isExplicit(config.rtmpProxy)) {
+        builder.setRtmpProxy(config.rtmpProxy);
+    }
     if (isExplicit(config.socketProxy)) {
         for (const proxy of config.socketProxy) {
             builder.addSocketProxy(proxy.host, proxy.port, proxy.proxyUrl);
