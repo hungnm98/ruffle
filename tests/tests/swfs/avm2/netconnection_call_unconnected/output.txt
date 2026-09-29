@@ -1,0 +1,5 @@
+never connected: returned undefined, connected = false
+never connected, with responder: returned undefined, connected = false
+connect(null) then close(): returned undefined, connected = false
+connect(null) then close(), with responder: returned undefined, connected = false
+done

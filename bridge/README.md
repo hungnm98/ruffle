@@ -37,9 +37,10 @@ The pinned librtmp source needs two local OpenSSL fixes, applied reproducibly by
 ## Scope and boundaries
 
 - Implements the AVM2 AMF0 NetConnection path used by this game: connect arguments, transaction IDs, result/status responders and server callbacks.
-- Desktop/other navigator backends do not gain RTMP transport. AMF3 object encoding, NetStream media, SharedObject and RTMPT/RTMPTE tunneling are not implemented by this bridge.
-- The loopback server permits only `http://127.0.0.1:5173` and `http://127.0.0.1:4173`, eight connections, 8 MiB messages and bounded queued bytes. It denies URL userinfo, queries, fragments, whitespace and empty app paths.
-- Default destination is only `103.116.100.95:80`, as observed in the game's config. To permit a verified game endpoint explicitly, set `VPT_RTMP_TARGETS=host:port,host:port`. Do not expose this local bridge publicly.
+- The native desktop navigator now exchanges the same AMF frames directly with a bundled `rtmp-worker` next to the player executable. It follows the native socket permission policy and does not require the Node/WebSocket server. See the parent project's `docs/native-macos.md` for packaging and verification.
+- AMF3 object encoding, NetStream media, SharedObject and RTMPT/RTMPTE tunneling are not implemented by this transport.
+- The loopback server permits only `http://127.0.0.1:5173` and `http://127.0.0.1:4173`, 64 connections shared by all web tabs (override with `VPT_BRIDGE_MAX_CONNECTIONS=1..256`), 8 MiB messages and bounded queued bytes. It denies URL userinfo, queries, fragments, whitespace and empty app paths.
+- Default destinations are `103.116.100.*:80`: the publisher range seen in each server's `profile/config.xml` (s44/s47 on `.94`, s48 on `.95`; line servers share the logic host). `*` matches one whole IPv4 octet; hostnames and other ports are rejected. Override with `VPT_RTMP_TARGETS=host:port,10.0.0.*:80`. Do not expose this local bridge publicly.
 - `VPT_RTMP_DIAGNOSTICS=1 npm start` prints command categories, lengths and fixed known status codes. Native library logging is suppressed because it can expose AMF arguments.
 - Normal startup disables full AMF capture: no automatic JSONL file and no `/capture` subscription in the web app. `/health` reports `captureEnabled: false`. `VPT_RTMP_CAPTURE` no longer enables it in the CLI. Existing log files remain unchanged.
 - Use the web Companion's Record controls to collect a bounded action trace and save it explicitly to `logs/game-actions-*.json`. Metadata updates continue outside recording. HTTP asset requests and RTMPE handshake packets are outside this recording.
@@ -63,3 +64,7 @@ cargo +1.97.1 test -p ruffle_core --lib net_connection::rtmp::tests --locked
 The web fork exposes the core's existing `with_spoofed_url` setting as `spoofedUrl`. The parent harness can fetch a credential-free asset URL while supplying the original root SWF identity and extracted FlashVars. It does not spoof the page origin or every child SWF URL. Direct mode disables HTTP URL rewrite rules and needs browser/server CORS support; the RTMPE bridge remains required in either mode.
 
 The RTMP `connect` object includes this logical root movie URL as `swfUrl`. A controlled live comparison identified this as the missing field behind `SERVER_NOT_READY`: the same credentials and AMF0 ECMA array were rejected without it and received `NetConnection.Connect.Success` with it. Changing only the array type or trailing slash did not resolve the rejection. The metadata currently identifies the root application; arbitrary nested-SWF connection identity has not been checked against Flash Player.
+
+## Embedded desktop sessions
+
+`createBridge` also accepts `authorizeConnection(request)`, `maxConnections` and `maxConnectionsPerSession`. The authorization callback returns a session key or rejects with a falsy value. The Electron host validates a private per-player capability and its loopback origin; the standalone web CLI keeps the existing exact `/rtmp` and origin checks. `closeSession(key)` revokes the matching sockets and waits for their native workers to exit. The host must also revoke the capability before calling it. `close()` is idempotent and waits for workers, with a bounded termination fallback.

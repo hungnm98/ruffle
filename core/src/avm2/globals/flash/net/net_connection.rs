@@ -330,7 +330,12 @@ pub fn call<'gc>(
         return Ok(Value::Undefined);
     }
 
-    Err(make_error_2126(activation))
+    // Flash Player drops calls on a NetConnection that was never connected or
+    // has been closed: no error, no request, and the responder is never called.
+    // Clients rely on this during reconnects (e.g. panels calling RPCs while
+    // being hidden after `close()`).
+    tracing::warn!("NetConnection.call({command}) ignored: not connected");
+    Ok(Value::Undefined)
 }
 
 pub fn add_header<'gc>(

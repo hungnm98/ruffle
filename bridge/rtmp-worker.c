@@ -2,7 +2,20 @@
 // command bodies; librtmp owns the handshake, encryption and control packets.
 #include <librtmp/rtmp.h>
 #include <librtmp/log.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#define STDIN_FILENO 0
+#define STDOUT_FILENO 1
+#define read _read
+#define write _write
+#else
 #include <arpa/inet.h>
+#include <sys/select.h>
+#include <unistd.h>
+#endif
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
@@ -10,8 +23,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/select.h>
-#include <unistd.h>
 
 #define MAX_FRAME (8 * 1024 * 1024)
 
@@ -22,7 +33,7 @@ static void quiet_log(int level, const char *format, va_list arguments) {
 static int transfer(int fd, void *buffer, size_t length, int writing) {
     unsigned char *p = buffer;
     while (length) {
-        ssize_t n = writing ? write(fd, p, length) : read(fd, p, length);
+        int n = writing ? (int)write(fd, p, (unsigned int)length) : (int)read(fd, p, (unsigned int)length);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return 0;
         p += n;
@@ -57,7 +68,14 @@ static int write_command(const char *body, uint32_t length) {
 
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
+#ifdef _WIN32
+    WSADATA sockets;
+    if (WSAStartup(MAKEWORD(2, 2), &sockets) != 0) return 2;
+    _setmode(STDIN_FILENO, _O_BINARY);
+    _setmode(STDOUT_FILENO, _O_BINARY);
+#else
     signal(SIGPIPE, SIG_IGN);
+#endif
     // Library diagnostics can contain AMF arguments. Never log them.
     RTMP_LogSetCallback(quiet_log);
     RTMP *rtmp = RTMP_Alloc();
@@ -90,13 +108,29 @@ int main(int argc, char **argv) {
         int socket = RTMP_Socket(rtmp);
         fd_set read_set;
         FD_ZERO(&read_set);
+#ifndef _WIN32
         FD_SET(STDIN_FILENO, &read_set);
+#endif
         FD_SET(socket, &read_set);
         struct timeval immediate = {0, 0};
         int buffered = rtmp->m_sb.sb_size > 0;
+#ifdef _WIN32
+        // Winsock select cannot wait on stdin's pipe. Poll that pipe at most
+        // every 10 ms while the socket stays responsive to incoming packets.
+        DWORD pending = 0;
+        HANDLE input = (HANDLE)_get_osfhandle(STDIN_FILENO);
+        if (!PeekNamedPipe(input, NULL, 0, NULL, &pending, NULL)) break;
+        struct timeval poll_interval = {0, 10000};
+        int ready = select(socket + 1, &read_set, NULL, NULL, (buffered || pending) ? &immediate : &poll_interval);
+        if (ready == SOCKET_ERROR) break;
+        if (!PeekNamedPipe(input, NULL, 0, NULL, &pending, NULL)) break;
+        int input_ready = pending > 0;
+#else
         int ready = select(socket + 1, &read_set, NULL, NULL, buffered ? &immediate : NULL);
         if (ready < 0) { if (errno == EINTR) continue; break; }
-        if (FD_ISSET(STDIN_FILENO, &read_set)) {
+        int input_ready = FD_ISSET(STDIN_FILENO, &read_set);
+#endif
+        if (input_ready) {
             if (!read_command(&command)) break;
             okay = RTMP_SendPacket(rtmp, &command, 0);
             RTMPPacket_Free(&command);
@@ -120,5 +154,8 @@ int main(int argc, char **argv) {
     }
     RTMPPacket_Free(&packet);
     RTMP_Close(rtmp); RTMP_Free(rtmp); free(url);
+#ifdef _WIN32
+    WSACleanup();
+#endif
     return 0;
 }

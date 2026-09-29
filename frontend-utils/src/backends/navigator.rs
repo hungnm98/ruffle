@@ -1,4 +1,5 @@
 mod fetch;
+mod rtmp;
 
 use crate::backends::navigator::fetch::{Response, ResponseBody};
 use crate::content::PlayingContent;
@@ -298,6 +299,35 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
             tracing::error!("Url::set_scheme failed on: {}", url);
         }
         url
+    }
+
+    fn connect_rtmp(&mut self, url: String, receiver: Receiver<Vec<u8>>, sender: Sender<Vec<u8>>) {
+        let Some((host, port)) = rtmp::destination(&url) else {
+            tracing::warn!("Invalid RTMP destination");
+            return;
+        };
+        let allowed = self.socket_allowed.contains(&format!("{host}:{port}"));
+        let mode = self.socket_mode;
+        let interface = self.interface.clone();
+        tokio::spawn(async move {
+            match (allowed, mode) {
+                (true, _) | (false, SocketMode::Allow) => {}
+                (false, SocketMode::Deny) => return,
+                (false, SocketMode::Ask) => {
+                    if !interface.confirm_socket(&host, port).await {
+                        return;
+                    }
+                }
+            }
+            let result = match rtmp::worker_path() {
+                Ok(worker) => rtmp::exchange(&worker, &url, receiver, sender).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                // Do not log the URL, command payload or child stderr.
+                tracing::warn!("Native RTMP transport stopped: {}", error.kind());
+            }
+        });
     }
 
     fn connect_socket(

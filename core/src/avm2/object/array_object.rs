@@ -4,6 +4,7 @@ use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
+use crate::avm2::dynamic_map::DynamicKey;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, TObject};
 use crate::avm2::value::Value;
@@ -109,6 +110,39 @@ impl<'gc> ArrayObject<'gc> {
     pub fn as_array_index(local_name: &WStr) -> Option<usize> {
         // Allow all `u32`s except u32::MAX.
         parse_u32_index(local_name, u32::MAX - 1).map(|i| i as usize)
+    }
+
+    /// Resolve a missing element (a hole or an index past `length`) without
+    /// stringifying the index. Mirrors `get_dynamic_property` for an integer
+    /// key: own dynamic values, then each prototype's dynamic values and, for
+    /// `Array.prototype`, its elements. Returns `None` for indices avmplus keeps
+    /// as string keys, leaving those to the slow path.
+    pub fn get_missing_element(self, index: usize) -> Option<Value<'gc>> {
+        // `maybe_int_property` only uses integer keys up to 2^28 - 1.
+        const MAX_U28: usize = (1 << 28) - 1;
+        if index > MAX_U28 {
+            return None;
+        }
+
+        let key = DynamicKey::Uint(index as u32);
+        if let Some(property) = self.base().values().get(&key) {
+            return Some(property.value);
+        }
+
+        let mut proto = self.proto();
+        while let Some(this_proto) = proto {
+            if let Some(property) = this_proto.base().values().get(&key) {
+                return Some(property.value);
+            }
+            if let Some(array) = this_proto.as_array_object()
+                && let Some(value) = array.get_index_property(index)
+            {
+                return Some(value);
+            }
+            proto = this_proto.proto();
+        }
+
+        Some(Value::Undefined)
     }
 
     pub fn set_element(self, mc: &Mutation<'gc>, index: usize, value: Value<'gc>) {

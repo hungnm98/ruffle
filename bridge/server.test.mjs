@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
-import { createBridge, validateTarget } from './server.mjs';
+import { createBridge, validateTarget, maxConnectionsFromEnv, DEFAULT_MAX_CONNECTIONS } from './server.mjs';
 
 test('default bridge disables full capture while still relaying game frames', async t => {
   const directory = await mkdtemp(path.join(tmpdir(), 'vpt-no-capture-'));
@@ -36,6 +36,30 @@ test('target policy keeps RTMPE app paths and rejects non-game destinations', ()
     'rtmpe://103.116.100.95:80/app?pass=secret', 'rtmpe://103.116.100.95:80/app\nconn=foo']) {
     assert.equal(validateTarget(value), null);
   }
+});
+
+test('default policy accepts every server in the publisher range and nothing outside it', () => {
+  for (const value of ['rtmpe://103.116.100.94:80/master/test/', 'rtmp://103.116.100.94:80/tcn/line3/', 'rtmpe://103.116.100.255:80/master/test/']) {
+    assert.equal(validateTarget(value), value);
+  }
+  for (const value of ['rtmpe://103.116.101.94:80/master/test/', 'rtmpe://103.116.100.94.evil.test:80/app', 'rtmpe://103.116.100.256:80/app',
+    'rtmpe://103.116.100.94:1935/app', 'rtmpe://x103.116.100.94:80/app']) {
+    assert.equal(validateTarget(value), null);
+  }
+});
+
+test('explicit targets still match exactly unless they use a wildcard octet', () => {
+  assert.equal(validateTarget('rtmpe://10.0.0.5:80/app', ['10.0.0.5:80']), 'rtmpe://10.0.0.5:80/app');
+  assert.equal(validateTarget('rtmpe://10.0.0.6:80/app', ['10.0.0.5:80']), null);
+  assert.equal(validateTarget('rtmpe://10.0.0.6:80/app', ['10.0.0.*:80']), 'rtmpe://10.0.0.6:80/app');
+  assert.equal(validateTarget('rtmpe://10.0.1.6:80/app', ['10.0.0.*:80']), null);
+});
+
+test('web tabs share a connection limit that the environment can raise', () => {
+  assert.equal(DEFAULT_MAX_CONNECTIONS, 64);
+  assert.equal(maxConnectionsFromEnv(undefined), 64);
+  assert.equal(maxConnectionsFromEnv('128'), 128);
+  for (const bad of ['0', '-1', '1.5', 'abc', '999']) assert.equal(maxConnectionsFromEnv(bad), 64);
 });
 
 test('rejects foreign origins before starting a worker', async () => {

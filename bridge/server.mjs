@@ -5,15 +5,36 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createCapture } from './capture.mjs';
 
 export const MAX_FRAME = 8 * 1024 * 1024;
-const defaultTargets = ['103.116.100.95:80'];
+// Game servers live in the publisher's 103.116.100.x range (s44/s47: .94, s48: .95) and
+// line servers share the logic host. `*` matches one whole IPv4 octet only.
+const defaultTargets = ['103.116.100.*:80'];
 const defaultOrigins = ['http://127.0.0.1:5173', 'http://127.0.0.1:4173'];
+// Every web tab shares the 'web' session and uses 1–2 sockets (channel, plus the master
+// server around login/line changes), so 64 leaves room for ~30 tabs.
+export const DEFAULT_MAX_CONNECTIONS = 64;
+export function maxConnectionsFromEnv(value = process.env.VPT_BRIDGE_MAX_CONNECTIONS) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= 256 ? n : DEFAULT_MAX_CONNECTIONS;
+}
+
+function targetAllowed(hostname, port, targets) {
+  const octets = hostname.split('.');
+  return targets.some(target => {
+    const [host, allowedPort] = target.split(':');
+    const pattern = host.split('.');
+    if (allowedPort !== port) return false;
+    if (!pattern.includes('*')) return host === hostname;
+    return octets.length === 4 && pattern.length === 4 && octets.every((octet, i) =>
+      /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/.test(octet) && (pattern[i] === '*' || pattern[i] === octet));
+  });
+}
 
 export function validateTarget(value, targets = defaultTargets) {
   if (typeof value !== 'string' || value.length > 2048 || /[\s\x00-\x1f]/.test(value)) return null;
   try {
     const url = new URL(value);
     if (!['rtmp:', 'rtmpe:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return null;
-    if (!targets.includes(`${url.hostname}:${url.port || '1935'}`) || !url.pathname || url.pathname === '/') return null;
+    if (!targetAllowed(url.hostname, url.port || '1935', targets) || !url.pathname || url.pathname === '/') return null;
     return url.href;
   } catch { return null; }
 }
@@ -31,7 +52,7 @@ function traceCommand(direction, bytes) {
 }
 
 export function createBridge({ port = 8181, targets = defaultTargets, origins = defaultOrigins,
-  capturePath, captureFull = false,
+  capturePath, captureFull = false, authorizeConnection, maxConnections = DEFAULT_MAX_CONNECTIONS, maxConnectionsPerSession = maxConnections,
   worker = fileURLToPath(new URL('./bin/rtmp-worker', import.meta.url)) } = {}) {
   const capture = capturePath ? createCapture(capturePath, { full: captureFull }) : null;
   let connectionId = 0;
@@ -58,17 +79,30 @@ export function createBridge({ port = 8181, targets = defaultTargets, origins = 
       });
       return;
     }
-    if (request.url !== '/rtmp' || !origins.includes(request.headers.origin) || sockets.clients.size >= 8) {
+    // Desktop callers supply a capability for each isolated player. The normal
+    // web bridge retains its exact path/origin policy and socket limit.
+    const session = authorizeConnection ? authorizeConnection(request)
+      : request.url === '/rtmp' && origins.includes(request.headers.origin) ? 'web' : null;
+    if (!session || sockets.clients.size >= maxConnections ||
+        [...sockets.clients].filter(ws => ws.sessionKey === session).length >= maxConnectionsPerSession) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
-    sockets.handleUpgrade(request, socket, head, ws => sockets.emit('connection', ws));
+    sockets.handleUpgrade(request, socket, head, ws => { ws.sessionKey = session; sockets.emit('connection', ws); });
   });
   sockets.on('connection', ws => {
     const connection = ++connectionId;
-    let child, buffer = Buffer.alloc(0), initialized = false;
+    let child, killTimer, buffer = Buffer.alloc(0), initialized = false;
     const deadline = setTimeout(() => ws.close(1008, 'Connection timed out'), 20000);
-    const cleanup = () => { clearTimeout(deadline); child?.kill('SIGTERM'); };
+    const cleanup = () => {
+      clearTimeout(deadline);
+      if (child && child.exitCode === null && child.signalCode === null && !killTimer) {
+        child.kill('SIGTERM');
+        killTimer = setTimeout(() => child.kill('SIGKILL'), 1500);
+        killTimer.unref();
+      }
+    };
+    ws.stopWorker = cleanup;
     ws.on('error', cleanup);
     ws.on('close', cleanup);
     ws.on('message', (data, binary) => {
@@ -77,6 +111,7 @@ export function createBridge({ port = 8181, targets = defaultTargets, origins = 
         if (!url) { ws.close(1008, 'Destination is not allowed'); return; }
         initialized = true;
         child = spawn(worker, [url], { stdio: ['pipe', 'pipe', 'pipe'] });
+        ws.workerClosed = new Promise(resolve => child.once('close', () => { clearTimeout(killTimer); resolve(); }));
         child.on('error', () => ws.close(1011, 'RTMP worker unavailable'));
         child.stdin.on('error', () => ws.close(1011, 'RTMP worker stopped'));
         child.on('close', () => ws.close(1000, 'RTMP connection closed'));
@@ -113,18 +148,28 @@ export function createBridge({ port = 8181, targets = defaultTargets, origins = 
     });
   });
   server.listen(port, '127.0.0.1');
-  return { server, sockets, close: () => {
-    for (const client of sockets.clients) client.terminate();
+  const stopClients = clients => {
+    const stopped = [];
+    for (const client of clients) { client.stopWorker?.(); client.terminate(); stopped.push(client.workerClosed); }
+    return Promise.all(stopped);
+  };
+  let closePromise;
+  return { server, sockets,
+    closeSession: session => stopClients([...sockets.clients].filter(ws => ws.sessionKey === session)),
+    close: () => {
+    if (closePromise) return closePromise;
+    const workersStopped = stopClients([...sockets.clients]);
     for (const viewer of viewers.clients) viewer.terminate();
     sockets.close();
     viewers.close();
     capture?.close();
-    return new Promise(resolve => server.close(resolve));
+    closePromise = Promise.all([workersStopped, new Promise(resolve => server.close(resolve))]);
+    return closePromise;
   } };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const bridge = createBridge({ targets: process.env.VPT_RTMP_TARGETS?.split(',') || defaultTargets });
+  const bridge = createBridge({ targets: process.env.VPT_RTMP_TARGETS?.split(',') || defaultTargets, maxConnections: maxConnectionsFromEnv() });
   console.info('Log toàn bộ đã tắt. Dùng Record trên web để ghi thao tác.');
   bridge.server.on('listening', () => console.info('RTMPE bridge: ws://127.0.0.1:8181/rtmp'));
   bridge.server.on('error', error => { console.error(error.code); process.exitCode = 1; });

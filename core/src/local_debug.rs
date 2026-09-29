@@ -161,6 +161,10 @@ fn execute(context: &mut UpdateContext<'_>, request: External) -> Result<Externa
         return Ok(External::Object(output));
     }
     if let Some(External::List(keys)) = field(&request, "pick") {
+        // Reading a property of null/undefined panics in Value::vtable and kills the player.
+        if matches!(value, Value::Null | Value::Undefined) {
+            return Err("Path reached null/undefined".into());
+        }
         let mut output = BTreeMap::new();
         for key in keys {
             let External::String(key) = key else {

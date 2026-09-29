@@ -947,6 +947,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if *self.context.actions_since_timeout_check >= 10000 {
             *self.context.actions_since_timeout_check = 0;
             if self.context.update_start.elapsed() >= self.context.max_execution_duration {
+                tracing::error!(
+                    "AVM2 script timeout after {:?}:{}",
+                    self.context.update_start.elapsed(),
+                    self.avm2().call_stack().borrow()
+                );
                 return Err(
                     "A script in this movie has taken too long to execute and has been terminated."
                         .into(),
@@ -1241,6 +1246,18 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         // default path for static names
         let object = self.pop_stack().null_check(self, Some(&multiname))?;
 
+        // `Array.length` is a native getter; loops like `while (i < a.length)`
+        // would otherwise pay a full method call per iteration. Subclasses may
+        // override the getter, so only plain `Array` instances take this path.
+        if multiname.local_name() == Some(istr!(self, "length"))
+            && multiname.valid_dynamic_name()
+            && let Some(array) = object.as_object().and_then(|o| o.as_array_object())
+            && array.instance_class() == self.avm2().class_defs().array
+        {
+            self.push_stack(Value::from_usize_lossy(array.storage().length()));
+            return Ok(());
+        }
+
         let value = object.get_property(&multiname, self)?;
         self.push_stack(value);
 
@@ -1263,14 +1280,25 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if let Value::Object(object) = object_value {
             match name_value {
                 Value::Integer(_) | Value::Number(_) => {
-                    if let Some(index) = name_value.try_as_index()
-                        && let Some(value) = object.get_index_property(index)
-                    {
-                        let _ = self.pop_stack();
-                        let _ = self.pop_stack();
-                        self.push_stack(value);
+                    if let Some(index) = name_value.try_as_index() {
+                        let value = object.get_index_property(index).or_else(|| {
+                            // Holes in a plain `Array` would otherwise stringify the
+                            // index and walk the slow lookup; sparse scans hit this a lot.
+                            // Subclasses may declare traits, so they keep the slow path.
+                            let array = object.as_array_object()?;
+                            (multiname.valid_dynamic_name()
+                                && object.instance_class() == self.avm2().class_defs().array)
+                                .then(|| array.get_missing_element(index))
+                                .flatten()
+                        });
 
-                        return Ok(());
+                        if let Some(value) = value {
+                            let _ = self.pop_stack();
+                            let _ = self.pop_stack();
+                            self.push_stack(value);
+
+                            return Ok(());
+                        }
                     }
                 }
                 Value::Object(name_object) => {

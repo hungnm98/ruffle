@@ -14,7 +14,7 @@ workspace = true
 default = ["native-tls"]
 cpal = ["dep:cpal", "dep:bytemuck", "ruffle_core/audio"]
 fs = []
-navigator = ["fs", "dep:async-io", "dep:tokio"]
+navigator = ["fs", "dep:async-io", "dep:tokio", "tokio/process"]
 ui = []
 freetype = ["ui", "dep:freetype-rs"]
 
