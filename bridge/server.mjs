@@ -53,7 +53,7 @@ function traceCommand(direction, bytes) {
 
 export function createBridge({ port = 8181, targets = defaultTargets, origins = defaultOrigins,
   capturePath, captureFull = false, authorizeConnection, maxConnections = DEFAULT_MAX_CONNECTIONS, maxConnectionsPerSession = maxConnections,
-  worker = fileURLToPath(new URL('./bin/rtmp-worker', import.meta.url)) } = {}) {
+  worker = fileURLToPath(new URL(`./bin/rtmp-worker${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url)) } = {}) {
   const capture = capturePath ? createCapture(capturePath, { full: captureFull }) : null;
   let connectionId = 0;
   const server = createServer((request, response) => {

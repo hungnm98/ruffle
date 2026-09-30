@@ -19,13 +19,19 @@ const patchedDh = dh.replace('MP_t g, p;', 'MP_t g = NULL, p = NULL;').replace('
   .replace('MP_setlength(dh, nKeyBits);', 'MP_setlength(dh, nKeyBits - 1);');
 if (dh !== patchedDh) writeFileSync(dhPath, patchedDh);
 const env = { ...process.env };
+// Windows: run from an MSYS2 MINGW64 shell (gcc, make, pkg-config, mingw-w64 OpenSSL/zlib).
+// The worker is linked statically so rtmp-worker.exe needs only Windows system DLLs.
+const windows = process.platform === 'win32';
 if (process.platform === 'darwin') {
   const prefix = execFileSync('brew', ['--prefix', 'openssl@3'], { encoding: 'utf8' }).trim();
   env.PKG_CONFIG_PATH = `${prefix}/lib/pkgconfig${env.PKG_CONFIG_PATH ? ':' + env.PKG_CONFIG_PATH : ''}`;
 }
-const flags = kind => execFileSync('pkg-config', [kind, 'openssl'], { encoding: 'utf8', env }).trim().split(/\s+/);
+const flags = kind => execFileSync('pkg-config', [...(windows ? ['--static'] : []), kind, 'openssl'], { encoding: 'utf8', env }).trim().split(/\s+/).filter(Boolean);
 // Build a pinned static librtmp against the same crypto library as the worker.
 // The older system library may have an incompatible OpenSSL ABI.
-execFileSync('make', ['-C', `${source}/librtmp`, 'SHARED=no', `SYS=${process.platform === 'darwin' ? 'darwin' : 'posix'}`, `INC=${flags('--cflags').join(' ')}`, 'librtmp.a'], { stdio: 'inherit', env });
-execFileSync('cc', ['-std=c11', '-D_POSIX_C_SOURCE=200809L', '-Wall', '-Wextra', '-Werror', '-O2', `-I${source}`, ...flags('--cflags'), `${directory}rtmp-worker.c`, `${source}/librtmp/librtmp.a`, '-o', `${directory}bin/rtmp-worker`, ...flags('--libs'), '-lz'], { stdio: 'inherit' });
+if (windows) execFileSync('make', ['-C', `${source}/librtmp`, 'clean'], { stdio: 'inherit', env });
+execFileSync('make', ['-C', `${source}/librtmp`, 'SHARED=no', `SYS=${windows ? 'mingw' : process.platform === 'darwin' ? 'darwin' : 'posix'}`, `INC=${flags('--cflags').join(' ')}`, 'librtmp.a'], { stdio: 'inherit', env });
+execFileSync(windows ? 'gcc' : 'cc', ['-std=c11', ...(windows ? ['-static'] : ['-D_POSIX_C_SOURCE=200809L']), '-Wall', '-Wextra', '-Werror', '-O2', `-I${source}`, ...flags('--cflags'),
+  `${directory}rtmp-worker.c`, `${source}/librtmp/librtmp.a`, '-o', `${directory}bin/rtmp-worker${windows ? '.exe' : ''}`, ...flags('--libs'), '-lz',
+  ...(windows ? ['-lws2_32', '-lwinmm', '-lgdi32', '-lcrypt32', '-luser32', '-ladvapi32'] : [])], { stdio: 'inherit', env });
 console.log('RTMP worker built');
