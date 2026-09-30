@@ -16,7 +16,9 @@ const object = Buffer.concat([Buffer.from([3]),
   field('objectEncoding', number(0)), Buffer.from([0, 0, 9])]);
 const body = Buffer.concat([string('connect'), number(1), object]);
 const length = Buffer.alloc(4); length.writeUInt32BE(body.length);
-const child = spawn(fileURLToPath(new URL('./bin/rtmp-worker', import.meta.url)), [url]);
+// VPT_WORKER_CMD runs another worker build, e.g. "wine /worker/rtmp-worker.exe" (Windows build under Wine).
+const [command, ...prefix] = process.env.VPT_WORKER_CMD ? process.env.VPT_WORKER_CMD.split(' ') : [fileURLToPath(new URL('./bin/rtmp-worker', import.meta.url))];
+const child = spawn(command, [...prefix, url]);
 child.stdin.on('error', () => {});
 child.stderr.pipe(process.stderr);
 child.stdin.write(Buffer.concat([length, body]));

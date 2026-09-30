@@ -60,6 +60,26 @@ static int read_command(RTMPPacket *packet) {
     return 1;
 }
 
+#ifdef _WIN32
+// Winsock select cannot wait on stdin, and PeekNamedPipe only works for named pipes.
+// A reader thread blocks on stdin and hands one command at a time to the main loop:
+// `input_ready` is set when `input_packet` holds a command (or stdin ended), and the
+// main loop sets `input_free` once it has sent it.
+static RTMPPacket input_packet;
+static volatile LONG input_ended = 0;
+static HANDLE input_ready, input_free;
+
+static DWORD WINAPI input_thread(LPVOID unused) {
+    (void)unused;
+    for (;;) {
+        WaitForSingleObject(input_free, INFINITE);
+        if (!read_command(&input_packet)) InterlockedExchange(&input_ended, 1);
+        SetEvent(input_ready);
+        if (input_ended) return 0;
+    }
+}
+#endif
+
 static int write_command(const char *body, uint32_t length) {
     uint32_t header = htonl(length);
     return length <= MAX_FRAME && transfer(STDOUT_FILENO, &header, 4, 1) &&
@@ -102,6 +122,14 @@ int main(int argc, char **argv) {
         return 1;
     }
     fprintf(stderr, "RTMP handshake complete\n");
+#ifdef _WIN32
+    input_ready = CreateEventW(NULL, FALSE, FALSE, NULL);
+    input_free = CreateEventW(NULL, FALSE, TRUE, NULL);
+    if (!input_ready || !input_free || !CreateThread(NULL, 0, input_thread, NULL, 0, NULL)) {
+        RTMP_Close(rtmp); RTMP_Free(rtmp); free(url);
+        return 2;
+    }
+#endif
     RTMPPacket packet = {0};
     int okay = 1;
     while (okay && RTMP_IsConnected(rtmp)) {
@@ -115,25 +143,30 @@ int main(int argc, char **argv) {
         struct timeval immediate = {0, 0};
         int buffered = rtmp->m_sb.sb_size > 0;
 #ifdef _WIN32
-        // Winsock select cannot wait on stdin's pipe. Poll that pipe at most
-        // every 10 ms while the socket stays responsive to incoming packets.
-        DWORD pending = 0;
-        HANDLE input = (HANDLE)_get_osfhandle(STDIN_FILENO);
-        if (!PeekNamedPipe(input, NULL, 0, NULL, &pending, NULL)) break;
+        // Check the reader thread at most every 10 ms while the socket stays
+        // responsive to incoming packets.
+        int queued = WaitForSingleObject(input_ready, 0) == WAIT_OBJECT_0;
         struct timeval poll_interval = {0, 10000};
-        int ready = select(socket + 1, &read_set, NULL, NULL, (buffered || pending) ? &immediate : &poll_interval);
+        int ready = select(socket + 1, &read_set, NULL, NULL, (buffered || queued) ? &immediate : &poll_interval);
         if (ready == SOCKET_ERROR) break;
-        if (!PeekNamedPipe(input, NULL, 0, NULL, &pending, NULL)) break;
-        int input_ready = pending > 0;
+        if (!queued) queued = WaitForSingleObject(input_ready, 0) == WAIT_OBJECT_0;
+        if (queued && input_ended) break;
+        int input_ready_now = queued;
 #else
         int ready = select(socket + 1, &read_set, NULL, NULL, buffered ? &immediate : NULL);
         if (ready < 0) { if (errno == EINTR) continue; break; }
-        int input_ready = FD_ISSET(STDIN_FILENO, &read_set);
+        int input_ready_now = FD_ISSET(STDIN_FILENO, &read_set);
 #endif
-        if (input_ready) {
+        if (input_ready_now) {
+#ifdef _WIN32
+            okay = RTMP_SendPacket(rtmp, &input_packet, 0);
+            RTMPPacket_Free(&input_packet);
+            SetEvent(input_free);
+#else
             if (!read_command(&command)) break;
             okay = RTMP_SendPacket(rtmp, &command, 0);
             RTMPPacket_Free(&command);
+#endif
         }
         if (okay && (buffered || FD_ISSET(socket, &read_set))) {
             if (!RTMP_ReadPacket(rtmp, &packet)) break;
