@@ -174,8 +174,11 @@ impl<'gc> NetConnections<'gc> {
         url: String,
         arguments: Vec<Rc<AmfValue>>,
     ) {
-        let (outgoing, receiver) = async_channel::bounded(256);
-        let (sender, incoming) = async_channel::bounded(256);
+        // Unbounded like Flash Player: a game that queues hundreds of calls in one frame (e.g. a
+        // gdc for every missing template right after login) or a server burst larger than one
+        // frame's worth must not make the socket loop give up and drop the connection.
+        let (outgoing, receiver) = async_channel::unbounded();
+        let (sender, incoming) = async_channel::unbounded();
         // Use the logical launch URL (including spoofedUrl), not the asset proxy
         // URL or the generated URL of a child loaded with Loader.loadBytes.
         let swf_url = context.root_swf.url().to_owned();
