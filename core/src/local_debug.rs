@@ -1,8 +1,11 @@
 //! Opt-in host-page inspection/calls. Game-specific behavior belongs in host JS.
 use crate::avm2::object::TObject;
 use crate::avm2::property::Property;
-use crate::avm2::{Activation, FunctionArgs, Value};
+use crate::avm2::{Activation, Avm2, EventObject, FunctionArgs, Value};
 use crate::context::UpdateContext;
+use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
+use crate::events::MouseButton;
+use crate::orphan_manager::OrphanManager;
 use crate::external::Value as External;
 use crate::string::AvmString;
 use std::collections::BTreeMap;
@@ -129,6 +132,15 @@ fn execute(context: &mut UpdateContext<'_>, request: External) -> Result<Externa
             return Err("A step needs get or call".into());
         }
     }
+    // A real left click on the display object the path reached: the movie's own listeners
+    // (with currentTarget set) decide what happens, as when a player clicks it.
+    if matches!(field(&request, "click"), Some(External::Bool(true))) {
+        let object = value.as_object().ok_or("click requires a display object")?;
+        let target = object.as_display_object().ok_or("click requires a display object")?;
+        let name = AvmString::new_utf8(activation.gc(), "click");
+        let event = EventObject::mouse_event(&mut activation, name, target, None, 0, true, MouseButton::Left);
+        return Ok(External::Bool(Avm2::dispatch_event(activation.context, event, object)));
+    }
     let mut budget = 20000;
     // Explicit, read-only access to stored traits for the opt-in local debugger.
     // Reject ambiguous names rather than guessing a superclass/private namespace.
@@ -187,7 +199,58 @@ fn execute(context: &mut UpdateContext<'_>, request: External) -> Result<Externa
     }
 }
 
+fn descendants(dobj: DisplayObject<'_>, budget: &mut usize) -> usize {
+    let mut count = 0;
+    if let Some(container) = dobj.as_container() {
+        for child in container.iter_render_list() {
+            if *budget == 0 {
+                break;
+            }
+            *budget -= 1;
+            count += 1 + descendants(child, budget);
+        }
+    }
+    count
+}
+
+// AVM2 orphans (clips with no parent whose frames Ruffle still runs every frame), grouped by class:
+// { total, classes: { name: [count, descendants, first instance names] } }.
+fn orphans(context: &mut UpdateContext<'_>) -> External {
+    let mut classes: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
+    let mut total = 0;
+    let mut budget = 200000;
+    OrphanManager::each_orphan_obj(context, |dobj, context| {
+        total += 1;
+        let class = dobj
+            .object2_or_null()
+            .as_object()
+            .map(|o| o.instance_of_class_name(context.gc()).to_string())
+            .unwrap_or_else(|| "<no avm2 object>".into());
+        let entry = classes.entry(class).or_default();
+        entry.0 += 1;
+        entry.1 += descendants(dobj, &mut budget);
+        if entry.2.len() < 5 {
+            entry.2.push(dobj.name().map(|n| n.to_string()).unwrap_or_default());
+        }
+    });
+    let classes = classes
+        .into_iter()
+        .map(|(name, (count, below, names))| {
+            let names = External::List(names.into_iter().map(External::String).collect());
+            (name, External::List(vec![External::Number(count as f64), External::Number(below as f64), names]))
+        })
+        .collect();
+    External::Object(BTreeMap::from([
+        ("total".into(), External::Number(total as f64)),
+        ("classes".into(), External::Object(classes)),
+    ]))
+}
+
 pub fn run(context: &mut UpdateContext<'_>, request: External) -> External {
+    if matches!(field(&request, "orphans"), Some(External::Bool(true))) {
+        let value = orphans(context);
+        return External::Object(BTreeMap::from([("ok".into(), External::Bool(true)), ("value".into(), value)]));
+    }
     let result = match execute(context, request) {
         Ok(value) => [("ok".into(), External::Bool(true)), ("value".into(), value)],
         Err(error) => [
