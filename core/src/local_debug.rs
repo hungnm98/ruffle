@@ -128,8 +128,16 @@ fn execute(context: &mut UpdateContext<'_>, request: External) -> Result<Externa
             value = value
                 .call_public_property(name, FunctionArgs::from_slice(&args), &mut activation)
                 .map_err(|e| e.to_string(&mut activation))?;
+        } else if let Some(name) = string(field(step, "set")) {
+            // Assigns a public property; the path goes on with the assigned value.
+            let assigned = field(step, "value").cloned().ok_or("set needs a value")?.into_avm2(activation.context);
+            let name = AvmString::new_utf8(activation.gc(), name);
+            value
+                .set_public_property(name, assigned, &mut activation)
+                .map_err(|e| e.to_string(&mut activation))?;
+            value = assigned;
         } else {
-            return Err("A step needs get or call".into());
+            return Err("A step needs get, call or set".into());
         }
     }
     // A real left click on the display object the path reached: the movie's own listeners
